@@ -23,8 +23,6 @@ jobs:
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
-          pwd
-          ls -la
           {
             echo '### trigger.c'
             gcc -O2 -Wall -Wextra -o trigger.exe trigger.c -lgdi32 -luser32 2>&1
@@ -75,44 +73,24 @@ jobs:
             picker.exe
           if-no-files-found: error
 
-      # Two traps this step has to avoid:
+      # Publish to a dedicated branch rather than main.
       #
-      # 1. Committing back to main re-triggers this workflow, and
-      #    build-report.txt embeds the SHA so it always differs -- that
-      #    would loop forever. Check HEAD's author before doing anything.
-      # 2. main advances while this job runs, so a plain push is rejected
-      #    as non-fast-forward. Rebase onto origin/main and retry.
+      # Pushing back to main was being rejected, and commit-back to main
+      # also re-triggers this workflow -- build-report.txt embeds the SHA,
+      # so it always differs and would loop forever.
       #
-      # Also fails loudly on the final attempt: the earlier version had the
-      # retry loop swallow the exit status, so a rejected push still
-      # reported success.
-      - name: Commit binaries and report back to main
+      # An orphan branch side-steps both problems: no parent history to
+      # rebase onto, no main to race against, no re-trigger (pushes from
+      # Actions do not start workflows), and force-push makes it
+      # idempotent. raw.githubusercontent.com serves it directly.
+      - name: Publish to build-output branch
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
-          if git log -1 --format='%an' | grep -q 'github-actions'; then
-            echo "HEAD is a bot build commit; not pushing again."
-            exit 0
-          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -q main.c 2>/dev/null || echo "main.c already gone"
-          git add -f trigger.exe picker.exe build-report.txt build-warnings.txt
-          if git diff --cached --quiet; then
-            echo "nothing to commit"
-            exit 0
-          fi
-          git commit -q -m "build: binaries from ${GITHUB_SHA}"
-          ok=1
-          for i in 1 2 3 4 5; do
-            git fetch -q origin main
-            git rebase origin/main >/dev/null 2>&1 || true
-            if git push origin HEAD:main; then ok=0; break; fi
-            echo "push attempt $i rejected, rebasing and retrying"
-            sleep 5
-          done
-          if [ "$ok" -ne 0 ]; then
-            echo "::error::could not push build artefacts to main"
-            exit 1
-          fi
-          echo "pushed build artefacts"
+          git checkout -q --orphan build-output
+          git add -f trigger.exe picker.exe build-report.txt build-warnings.txt trigger.c picker.c
+          git commit -q -m "build ${GITHUB_SHA}"
+          git push --force origin HEAD:build-output
+          echo "published to build-output"
