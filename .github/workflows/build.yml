@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -20,19 +23,60 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
-          gcc -O2 -Wall -Wextra -o trigger.exe main.c -lgdi32 -luser32
+          gcc -O2 -Wall -Wextra -o trigger.exe main.c -lgdi32 -luser32 2> build-warnings.txt
+          cat build-warnings.txt
           ls -l trigger.exe
 
       - name: Strip
         shell: msys2 {0}
-        run: strip -x trigger.exe || true
+        run: |
+          strip --strip-unneeded trigger.exe || true
 
-      - name: Section sizes
+      - name: Build report
         shell: msys2 {0}
-        run: size trigger.exe || true
+        run: |
+          {
+            echo "# Build report"
+            echo
+            echo "- commit: ${GITHUB_SHA}"
+            echo "- run:    ${GITHUB_RUN_ID}"
+            echo "- built:  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "- gcc:    $(gcc -dumpversion)"
+            echo "- binary: $(stat -c%s trigger.exe) bytes"
+            echo
+            echo '## Compiler warnings'
+            echo '```'
+            cat build-warnings.txt
+            echo '```'
+            echo
+            echo '## Section sizes'
+            echo '```'
+            size trigger.exe || true
+            echo '```'
+          } > build-report.txt
+          cat build-report.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: trigger-win64
           path: trigger.exe
           if-no-files-found: error
+
+      - name: Commit binary and report back to main
+        continue-on-error: true
+        shell: msys2 {0}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f trigger.exe
+          git add -f build-report.txt build-warnings.txt
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "build: trigger.exe from ${GITHUB_SHA}"
+            for i in 1 2 3; do
+              git push origin HEAD:main && break
+              echo "push attempt $i failed, retrying"
+              sleep 5
+            done
+          fi
