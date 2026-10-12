@@ -1,96 +1,145 @@
 # XCloud_Ai_Player_CV
 
-A Win32 screen-color trigger automation tool, built and compiled via GitHub Actions.
+Two Win32 tools for sampling and reacting to on-screen colour, built automatically
+by GitHub Actions.
 
-## What it does
+- **`picker.exe`** — a magnifier that reads the exact RGB under your cursor.
+- **`trigger.exe`** — watches a small circle at screen centre and clicks when a
+  target colour appears there.
 
-1. Captures a screen region with GDI `BitBlt` into a single 32bpp `DIBSection`.
-2. Downsamples that region to a small buffer (default 160x120).
-3. Classifies each downsampled pixel in O(1) through a precomputed RGB555 color LUT.
-4. Scans the buffer in blocks; when a block's hit ratio crosses a threshold, emits a
-   mouse move and click via `SendInput`.
-
-`F8` stops the loop via a `RegisterHotKey` message handler.
-
-Win32 API only. No GPU, no ML, no third-party libraries.
+No GPU, no ML, no third-party libraries. Win32 API only.
 
 ## Build
 
-Actions builds on every push to `main`; the binary is attached as the
-`trigger-win64` artifact.
-
-Local build with MinGW:
+Actions builds on every push to `main`; both binaries are attached as the
+`win64-binaries` artifact and committed back to the repo root.
 
 ```
-gcc -O2 -o trigger.exe main.c -lgdi32 -luser32
+gcc -O2 -Wall -Wextra -o trigger.exe trigger.c -lgdi32 -luser32
+gcc -O2 -Wall -Wextra -o picker.exe  picker.c  -lgdi32 -luser32
 ```
 
-MSVC:
+## 1. Finding the target colour — picker.exe
+
+Run it, then move the mouse over whatever you want to sample. The window is a
+16x16 pixel patch magnified 12x, drawn with `COLORONCOLOR` so each screen pixel
+maps to a solid block — a smoothed or averaged magnifier would report colours
+that are not actually on screen.
+
+| key | action |
+| --- | --- |
+| move mouse | magnifier follows the cursor |
+| left click | record the colour under the cursor |
+| `C` | copy the recorded list to the clipboard |
+| `S` | write the list to `picked-colors.txt` |
+| `Esc` | quit |
+
+The readout is taken from the same captured buffer that is drawn, so the number
+in the title bar and the green-highlighted pixel cannot disagree.
+
+Sample several pixels — the lit centre of a uniform and a shadowed edge are
+different values. Multiple `color` lines are supported and matched in order.
+
+## 2. trigger.exe
+
+Watches a circle of radius `--radius` (default 30px) at screen centre. When the
+matched-pixel ratio inside that circle crosses a threshold, it moves the cursor
+to the centroid of the matched pixels and clicks.
+
+| key | action |
+| --- | --- |
+| `F8` | stop |
+| `F9` | force re-arm, overriding the hysteresis timer |
+
+### Options
 
 ```
-cl /O2 main.c user32.lib gdi32.lib
+--config FILE       read settings from FILE (default: trigger.cfg if present)
+--color RRGGBB      target colour, repeatable, max 8
+--tolerance N       RGB match radius, 0-255 (default 40)
+--radius N          detection circle radius in px (default 30)
+--center X,Y        circle centre (default: screen centre)
+--threshold PCT     percent of circle area that must match (default 5)
+--min-hits N        absolute minimum matching pixels (default 3)
+--rearm-ms N        target must be absent this long before re-arming (default 2500)
+--cooldown-ms N     minimum gap between emissions (default 200)
+--fps N             capture rate (default 60)
+--move-only         move the cursor, never click
+--quiet             suppress per-trigger output
+--save-config FILE  write effective settings out and exit
 ```
 
-## Usage
+### Config file
 
-```
-trigger.exe [options]
+`trigger.cfg` in the working directory is read automatically if present. Command
+line arguments override it.
 
-  --color RRGGBB      trigger color, repeatable (max 8, default FF0000)
-  --tolerance N      per-channel match radius, 0-255 (default 40)
-  --region x,y,w,h   capture region, virtual-desktop pixels
-                      (default: 480x360 centered on the primary monitor)
-  --size WxH         downsampled buffer size (default 160x120)
-  --block N          block edge in downsampled pixels (default 8)
-  --threshold PCT    hit percent per block to trigger (default 8)
-  --cooldown MS      minimum gap between emissions (default 400)
-  --rearm N          clear frames required before re-arming (default 10)
-  --fps N            target capture rate (default 60)
-  --best             scan every block, trigger on the strongest
-  --move-only        move the cursor, never click
-  --quiet            suppress per-trigger output
-  --help             this text
+```ini
+# repeat for multiple targets
+color       = E03A28
+color       = F26B5B
+tolerance   = 40
+zone_radius = 30
+threshold   = 5
+min_hits    = 3
+rearm_ms    = 2500
+cooldown_ms = 200
+fps         = 60
+move_only   = 0
 ```
 
-Press `F8` to stop.
+`trigger.exe --save-config out.cfg` writes the current effective settings, so you
+can capture a known-good state and edit from there.
 
-Example: watch for a red pixel cluster in the top-left quadrant and move the cursor to it.
+### Compression tolerance
 
-```
-trigger.exe --color FF2020 --tolerance 60 --region 0,0,640,360 --threshold 5
-```
+Over a compressed video stream, a flat colour is not a single RGB value — block
+artefacts and chroma subsampling shift individual pixels by a surprising amount.
+The default tolerance of 40 is deliberately wide. Start wide and tighten until
+you start missing the target; a tolerance that is too tight on a compressed feed
+will drop frames and look intermittent.
 
-## Optimization notes
+If matching is too easy, lower it. If it is intermittent, raise it.
 
-**Color LUT.** Naive classification compares every pixel against every target color
-with a squared-distance test. Instead, all 32768 possible RGB555 values are
-classified once at startup, so the inner loop is a single array index. Tolerance is
-squared once at startup so the hot path needs no multiply, and never a `sqrt`.
+## Design notes
 
-**Stride downsampling.** GDI has no cheap downscaled capture path; `StretchBlt` still
-touches every source pixel and pays for color management. The tool reads exactly
-`dstW * dstH` pixels instead, so per-frame work scales with the output buffer rather
-than the region size. Integer index mapping avoids cumulative drift.
+**Circular zone, no down-sampling.** The capture is exactly the bounding box of
+the circle — 61x61 pixels at the default radius, 14KB. Cost is O(radius²) instead
+of O(screen area), so the detector can run at 60fps while touching far fewer
+pixels than a single full-screen grab. Because the region is already small, it is
+scanned 1:1; reducing a large capture to a small buffer and hoping the stride
+lands on the target is strictly worse here.
 
-**Block scan with early exit.** Scanning the whole frame wastes work on the ~95% of
-pixels that are background. Blocks are tested against a hit *ratio* (not a raw count),
-so partial edge blocks behave correctly, and the scan returns on the first block that
-crosses the threshold. `--best` disables the early exit to scan every block.
+**Colour LUT.** Comparing every pixel against every target colour is the obvious
+approach and costs up to 8 distance computations per pixel. Instead all 32768
+possible RGB555 values are classified once at startup, so the inner loop is a
+single array index. Tolerance is squared at startup so the hot path needs no
+multiplication and never a `sqrt`.
 
-**Hysteresis.** A trigger usually stays on screen for many consecutive frames. The
-tool emits once, then requires `--rearm` clear frames before re-arming, so a single
-visual event produces a single action rather than one per frame.
+The match region is a sphere in RGB space, not a per-channel box. Both are common;
+the sphere is rounder and less likely to accept colours that are close in one
+channel but far in the others.
 
-**Memory.** There is exactly one large allocation: the capture DIB at
-`region_w * region_h * 4` bytes. A 480x360 region is 691KB; a full 1920x1080 region is
-8.3MB. Shrinking the region is by far the biggest memory lever. The LUT is 32KB and
-the downsampled buffer is 76KB.
+**Strict hysteresis.** A target stays on screen for many consecutive frames. The
+tool fires once, then requires the target to be *continuously* absent for the full
+`rearm_ms` window before re-arming — so one visual event produces exactly one
+action instead of one per frame. `F9` re-arms immediately if you want to override
+the timer.
+
+**Centroid targeting.** The click lands on the centroid of the matched pixels,
+not the geometric centre of the circle, so it tracks where the target actually
+is inside the zone.
+
+**UIPI.** `SendInput` does not bypass User Interface Privilege Isolation. Injecting
+into an elevated window or a UAC prompt is blocked; driving one requires an
+elevated process. Registration of the hotkeys can also fail if something else
+already owns F8 or F9 — the tool warns rather than dying.
 
 ## Scope
 
-This is a generic local automation tool built on documented Win32 APIs. Using it to
-gain an advantage in an online game is cheating and breaches those games' terms of
-service. It is intended for automating your own software, UI testing, and
-accessibility work.
+These are generic local automation tools built on documented Win32 APIs. Using
+them to gain an advantage in an online game is cheating and breaches those games'
+terms of service. Automating your own software, UI testing, and accessibility work
+are the intended uses.
 
-The build artifact is unsigned, so SmartScreen or antivirus may flag it.
+Both binaries are unsigned, so SmartScreen or antivirus may flag them.
