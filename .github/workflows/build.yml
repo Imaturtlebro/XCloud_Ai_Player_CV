@@ -17,7 +17,6 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
           install: mingw-w64-x86_64-gcc
 
       - name: Build
@@ -62,10 +61,18 @@ jobs:
           path: trigger.exe
           if-no-files-found: error
 
+      # Committing back to main re-triggers this workflow. build-report.txt
+      # embeds the SHA, so it always differs and would loop forever. This
+      # guard makes exactly one round trip: if the commit we are building
+      # was itself a bot build, stop here and let the run end.
       - name: Commit binary and report back to main
         continue-on-error: true
         shell: msys2 {0}
         run: |
+          if git log -1 --format='%an' | grep -q 'github-actions'; then
+            echo "HEAD is a bot build commit; not pushing again."
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f trigger.exe
