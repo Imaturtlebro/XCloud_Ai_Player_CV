@@ -19,9 +19,15 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
 
+      # The msys2 shell does not reliably start in $GITHUB_WORKSPACE, and a
+      # wrong working directory makes gcc fail with "main.c: No such file".
+      # cd explicitly in every step rather than relying on the default.
       - name: Build
         shell: msys2 {0}
         run: |
+          cd "$GITHUB_WORKSPACE"
+          pwd
+          ls -la
           gcc -O2 -Wall -Wextra -o trigger.exe main.c -lgdi32 -luser32 2> build-warnings.txt
           cat build-warnings.txt
           ls -l trigger.exe
@@ -29,11 +35,13 @@ jobs:
       - name: Strip
         shell: msys2 {0}
         run: |
+          cd "$GITHUB_WORKSPACE"
           strip --strip-unneeded trigger.exe || true
 
       - name: Build report
         shell: msys2 {0}
         run: |
+          cd "$GITHUB_WORKSPACE"
           {
             echo "# Build report"
             echo
@@ -69,6 +77,7 @@ jobs:
         continue-on-error: true
         shell: msys2 {0}
         run: |
+          cd "$GITHUB_WORKSPACE"
           if git log -1 --format='%an' | grep -q 'github-actions'; then
             echo "HEAD is a bot build commit; not pushing again."
             exit 0
