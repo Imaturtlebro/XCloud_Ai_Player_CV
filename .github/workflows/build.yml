@@ -13,6 +13,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -73,24 +75,38 @@ jobs:
             picker.exe
           if-no-files-found: error
 
-      # Publish to a dedicated branch rather than main.
+      # Publish to a dedicated orphan branch rather than main.
       #
-      # Pushing back to main was being rejected, and commit-back to main
-      # also re-triggers this workflow -- build-report.txt embeds the SHA,
-      # so it always differs and would loop forever.
+      # Committing back to main re-triggers this workflow, and
+      # build-report.txt embeds the SHA so it always differs -- that
+      # would loop forever. An orphan branch side-steps that, and
+      # force-push makes it idempotent.
       #
-      # An orphan branch side-steps both problems: no parent history to
-      # rebase onto, no main to race against, no re-trigger (pushes from
-      # Actions do not start workflows), and force-push makes it
-      # idempotent. raw.githubusercontent.com serves it directly.
-      - name: Publish to build-output branch
+      # Split into two steps so a failure localises to prepare vs push.
+      - name: Prepare output tree
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan build-output
+          git rm -rqf . 2>/dev/null || true
           git add -f trigger.exe picker.exe build-report.txt build-warnings.txt trigger.c picker.c
           git commit -q -m "build ${GITHUB_SHA}"
+          git log --oneline -1
+          git ls-files
+
+      # Push with the token spelled out in the URL rather than relying on
+      # the extraheader that actions/checkout persists, which has been the
+      # thing failing.
+      - name: Push build-output branch
+        shell: msys2 {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           git push --force origin HEAD:build-output
           echo "published to build-output"
