@@ -19,8 +19,6 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
 
-      # The msys2 shell does not reliably start in $GITHUB_WORKSPACE, and a
-      # wrong working directory makes gcc fail with "main.c: No such file".
       - name: Build
         shell: msys2 {0}
         run: |
@@ -77,12 +75,18 @@ jobs:
             picker.exe
           if-no-files-found: error
 
-      # Committing back to main re-triggers this workflow. build-report.txt
-      # embeds the SHA, so it always differs and would loop forever. This
-      # guard makes exactly one round trip: if the commit we are building
-      # was itself a bot build, stop here and let the run end.
+      # Two traps this step has to avoid:
+      #
+      # 1. Committing back to main re-triggers this workflow, and
+      #    build-report.txt embeds the SHA so it always differs -- that
+      #    would loop forever. Check HEAD's author before doing anything.
+      # 2. main advances while this job runs, so a plain push is rejected
+      #    as non-fast-forward. Rebase onto origin/main and retry.
+      #
+      # Also fails loudly on the final attempt: the earlier version had the
+      # retry loop swallow the exit status, so a rejected push still
+      # reported success.
       - name: Commit binaries and report back to main
-        continue-on-error: true
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -92,14 +96,23 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q main.c 2>/dev/null || echo "main.c already gone"
           git add -f trigger.exe picker.exe build-report.txt build-warnings.txt
           if git diff --cached --quiet; then
             echo "nothing to commit"
-          else
-            git commit -m "build: binaries from ${GITHUB_SHA}"
-            for i in 1 2 3; do
-              git push origin HEAD:main && break
-              echo "push attempt $i failed, retrying"
-              sleep 5
-            done
+            exit 0
           fi
+          git commit -q -m "build: binaries from ${GITHUB_SHA}"
+          ok=1
+          for i in 1 2 3 4 5; do
+            git fetch -q origin main
+            git rebase origin/main >/dev/null 2>&1 || true
+            if git push origin HEAD:main; then ok=0; break; fi
+            echo "push attempt $i rejected, rebasing and retrying"
+            sleep 5
+          done
+          if [ "$ok" -ne 0 ]; then
+            echo "::error::could not push build artefacts to main"
+            exit 1
+          fi
+          echo "pushed build artefacts"
