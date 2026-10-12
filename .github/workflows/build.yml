@@ -21,22 +21,27 @@ jobs:
 
       # The msys2 shell does not reliably start in $GITHUB_WORKSPACE, and a
       # wrong working directory makes gcc fail with "main.c: No such file".
-      # cd explicitly in every step rather than relying on the default.
       - name: Build
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
           pwd
           ls -la
-          gcc -O2 -Wall -Wextra -o trigger.exe main.c -lgdi32 -luser32 2> build-warnings.txt
-          cat build-warnings.txt
-          ls -l trigger.exe
+          {
+            echo '### trigger.c'
+            gcc -O2 -Wall -Wextra -o trigger.exe trigger.c -lgdi32 -luser32 2>&1
+            echo "trigger.c exit=$?"
+            echo '### picker.c'
+            gcc -O2 -Wall -Wextra -o picker.exe picker.c -lgdi32 -luser32 2>&1
+            echo "picker.c exit=$?"
+          } | tee build-warnings.txt
 
       - name: Strip
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
           strip --strip-unneeded trigger.exe || true
+          strip --strip-unneeded picker.exe  || true
 
       - name: Build report
         shell: msys2 {0}
@@ -49,31 +54,34 @@ jobs:
             echo "- run:    ${GITHUB_RUN_ID}"
             echo "- built:  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "- gcc:    $(gcc -dumpversion)"
-            echo "- binary: $(stat -c%s trigger.exe) bytes"
+            echo "- trigger.exe: $(stat -c%s trigger.exe) bytes"
+            echo "- picker.exe:  $(stat -c%s picker.exe) bytes"
             echo
-            echo '## Compiler warnings'
+            echo '## Compiler output'
             echo '```'
             cat build-warnings.txt
             echo '```'
             echo
             echo '## Section sizes'
             echo '```'
-            size trigger.exe || true
+            size trigger.exe picker.exe || true
             echo '```'
           } > build-report.txt
           cat build-report.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: trigger-win64
-          path: trigger.exe
+          name: win64-binaries
+          path: |
+            trigger.exe
+            picker.exe
           if-no-files-found: error
 
       # Committing back to main re-triggers this workflow. build-report.txt
       # embeds the SHA, so it always differs and would loop forever. This
       # guard makes exactly one round trip: if the commit we are building
       # was itself a bot build, stop here and let the run end.
-      - name: Commit binary and report back to main
+      - name: Commit binaries and report back to main
         continue-on-error: true
         shell: msys2 {0}
         run: |
@@ -84,12 +92,11 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f trigger.exe
-          git add -f build-report.txt build-warnings.txt
+          git add -f trigger.exe picker.exe build-report.txt build-warnings.txt
           if git diff --cached --quiet; then
             echo "nothing to commit"
           else
-            git commit -m "build: trigger.exe from ${GITHUB_SHA}"
+            git commit -m "build: binaries from ${GITHUB_SHA}"
             for i in 1 2 3; do
               git push origin HEAD:main && break
               echo "push attempt $i failed, retrying"
