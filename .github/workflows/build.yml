@@ -1,26 +1,34 @@
 name: build
 
+# Builds both binaries on every push to main and attaches them as the
+# `win64-binaries` artifact.
+#
+# Artefacts are attached rather than committed back to main on purpose:
+# committing to main re-triggers this workflow, and any report file that
+# embeds the SHA always differs, so that loops forever. Downloading the
+# artifact needs a token with actions:read -- see the README.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
 
+      # cd explicitly: the msys2 shell does not reliably start in
+      # $GITHUB_WORKSPACE, and gcc then fails with "no such file".
       - name: Build
         shell: msys2 {0}
         run: |
@@ -34,6 +42,15 @@ jobs:
             echo "picker.c exit=$?"
           } | tee build-warnings.txt
 
+      - name: Smoke test
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          ./trigger.exe --help
+          ./trigger.exe --color FF3355 --radius 25 --save-config ci-test.cfg
+          cat ci-test.cfg
+          rm -f ci-test.cfg
+
       - name: Strip
         shell: msys2 {0}
         run: |
@@ -41,31 +58,11 @@ jobs:
           strip --strip-unneeded trigger.exe || true
           strip --strip-unneeded picker.exe  || true
 
-      - name: Build report
+      - name: Sizes
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
-          {
-            echo "# Build report"
-            echo
-            echo "- commit: ${GITHUB_SHA}"
-            echo "- run:    ${GITHUB_RUN_ID}"
-            echo "- built:  $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "- gcc:    $(gcc -dumpversion)"
-            echo "- trigger.exe: $(stat -c%s trigger.exe) bytes"
-            echo "- picker.exe:  $(stat -c%s picker.exe) bytes"
-            echo
-            echo '## Compiler output'
-            echo '```'
-            cat build-warnings.txt
-            echo '```'
-            echo
-            echo '## Section sizes'
-            echo '```'
-            size trigger.exe picker.exe || true
-            echo '```'
-          } > build-report.txt
-          cat build-report.txt
+          size trigger.exe picker.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -73,40 +70,5 @@ jobs:
           path: |
             trigger.exe
             picker.exe
+            build-warnings.txt
           if-no-files-found: error
-
-      # Publish to a dedicated orphan branch rather than main.
-      #
-      # Committing back to main re-triggers this workflow, and
-      # build-report.txt embeds the SHA so it always differs -- that
-      # would loop forever. An orphan branch side-steps that, and
-      # force-push makes it idempotent.
-      #
-      # Split into two steps so a failure localises to prepare vs push.
-      - name: Prepare output tree
-        shell: msys2 {0}
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -q --orphan build-output
-          git rm -rqf . 2>/dev/null || true
-          git add -f trigger.exe picker.exe build-report.txt build-warnings.txt trigger.c picker.c
-          git commit -q -m "build ${GITHUB_SHA}"
-          git log --oneline -1
-          git ls-files
-
-      # Push with the token spelled out in the URL rather than relying on
-      # the extraheader that actions/checkout persists, which has been the
-      # thing failing.
-      - name: Push build-output branch
-        shell: msys2 {0}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          git remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          git push --force origin HEAD:build-output
-          echo "published to build-output"
